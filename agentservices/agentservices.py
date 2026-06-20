@@ -5,7 +5,7 @@ from langchain_pinecone import Pinecone
 import site
 import os
 class AgentServices:
-    def __init__(self,llm_model,llm_api_key,embedding_model,pinecone_api_key,pinecone_index_name,chunk_size=100,chunk_overlap=1000):
+    def __init__(self,llm_model,llm_api_key,embedding_model,pinecone_api_key,pinecone_index_name,chunk_size=1000,chunk_overlap=200):
         self.llm_model = llm_model
         self.llm_api_key = llm_api_key
         self.embedding_model = embedding_model
@@ -71,7 +71,8 @@ class AgentServices:
         if not vector_store:
             return {"message": "Vector store not available"}
         try:
-            docs = vector_store.similarity_search(query)
+            # limit the number of retrieved documents to keep prompts small
+            docs = vector_store.similarity_search(query, k=5)
             if not docs:
                 return {"message": "No relevant documents found"}
             print (f"Retrieved documents: {len(docs)}")
@@ -84,15 +85,31 @@ class AgentServices:
         docs = self.retrive_from_vector(query)
         if not docs:
             return {"message": "No relevant documents found"}
-        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+        llm = ChatGoogleGenerativeAI(model=self.llm_model or "gemini-2.5-flash",thinking_budget=0)
+        # limit number of retrieved docs to avoid huge prompts
+        try:
+            limited_docs = docs[:5]
+        except Exception:
+            limited_docs = docs
+
+        # build context but cap by a rough character budget to limit tokens
+        max_chars = 12000
         context_parts = []
-        sources = []
-        for doc in docs:
-            context_parts.append(doc.page_content)
-            sources.append(doc.metadata.get("source"))
-            sources.append(doc.metadata.get("source"))
-        context="\n".join(context_parts)
-        sources="\n".join(sources)
+        sources_list = []
+        total_chars = 0
+        for doc in limited_docs:
+            part = doc.page_content or ""
+            part_len = len(part)
+            if total_chars + part_len > max_chars:
+                # stop adding more context when hitting the budget
+                break
+            context_parts.append(part)
+            total_chars += part_len
+            src = doc.metadata.get("source")
+            if src:
+                sources_list.append(src)
+        context = "\n".join(context_parts)
+        sources = "\n".join(sources_list)
         prompt = f"""You are an assistant that answers questions based on the following context extracted from a PDF document. Use the context to provide a concise and accurate answer to the user's question. If the context does not contain enough information, say you don't know.
             Context:
             {context}
@@ -105,15 +122,12 @@ class AgentServices:
         #  "answer": response.content.strip(), "sources": sources,"Input_tokens": response.usage_metadata.input_tokens,"output_token":response.usage_metadata.output_tokens
         # } 
         return {
-     
-        "content": response.content,
-        "input_tokens": response.usage_metadata.get("input_tokens", 0),
-        "output_tokens": response.usage_metadata.get("output_tokens", 0),
-        "total_tokens": response.usage_metadata.get("total_tokens", 0),
-    
-    "sources":os.path.basename(doc.metadata.get("source", ""))
-
-}
+            "content": response.content,
+            "input_tokens": response.usage_metadata.get("input_tokens", 0),
+            "output_tokens": response.usage_metadata.get("output_tokens", 0),
+            "total_tokens": response.usage_metadata.get("total_tokens", 0),
+            "sources": sources_list,
+        }
 #         {
 #     "answer": response.content.strip(),
 #     "sources": sources,
